@@ -14,6 +14,7 @@ import userSocketController from "../controllers/user/user.socket.controller.js"
 import socialFeedSocketController from "../controllers/socialfeed/socialFeed.socket.controller.js";
 import employeeController from "../controllers/employee/employee.controller.js";
 import notesController from "../controllers/employee/notes.controller.js";
+import { handleDealsDashboardSocket } from "./dealsDashboard.socket.js";
 
 const router = (socket, io, role) => {
   console.log(`Setting up socket router for role: ${role}`);
@@ -56,6 +57,8 @@ const router = (socket, io, role) => {
       activityController(socket, io);
       console.log("Attaching deal controller for admin...");
       dealController(socket, io);
+      console.log("Attaching deals dashboard controller for admin...");
+      handleDealsDashboardSocket(socket, io);
       console.log("Attaching deal controller for deals...");
       userSocketController(socket, io);
       console.log("Attaching social feed controller for admin...");
@@ -78,6 +81,8 @@ const router = (socket, io, role) => {
       activityController(socket, io);
       console.log("Attaching deal controller for hr...");
       dealController(socket, io);
+      console.log("Attaching deals dashboard controller for hr...");
+      handleDealsDashboardSocket(socket, io);
       userSocketController(socket, io);
       console.log("Attaching social feed controller for hr...");
       socialFeedSocketController(socket, io);
@@ -96,7 +101,8 @@ const router = (socket, io, role) => {
     case "employee":
       console.log("Attaching Employee controller...");
       employeeController(socket, io);
-
+      console.log("Attaching deals dashboard controller for employee...");
+      handleDealsDashboardSocket(socket, io);
       break;
     default:
       console.log(

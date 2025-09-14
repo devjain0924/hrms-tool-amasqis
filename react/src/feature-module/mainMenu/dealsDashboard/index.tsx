@@ -9,74 +9,152 @@ import dayjs from "dayjs";
 import { Chart } from "primereact/chart";
 import PredefinedDateRanges from "../../../core/common/datePicker";
 import CollapseHeader from "../../../core/common/collapse-header/collapse-header";
+import { useSocket } from "../../../SocketContext";
+import { useUser } from "@clerk/clerk-react";
+import jsPDF from "jspdf";
+import * as XLSX from "xlsx";
+import CircleProgress from "../leadsDashboard/circleProgress";
+
+// Type definitions for deals dashboard data
+interface DealData {
+  totalDeals: number;
+  totalDealValue: number;
+  wonDeals: number;
+  lostDeals: number;
+  averageDealSize: number;
+  conversionRate: number;
+  revenueThisMonth: number;
+  activeDeals: number;
+  dealsByStage: {
+    New: number;
+    Prospect: number;
+    Proposal: number;
+    Won: number;
+    Lost: number;
+    monthlyData: {
+      new: number[];
+      prospect: number[];
+      proposal: number[];
+      won: number[];
+      lost: number[];
+      revenue: number[];
+    };
+  };
+  dealsByOwner: Array<{ name: string; deals: number; value: number }>;
+  dealsBySource: Array<{ name: string; count: number; value: number }>;
+  topDeals: Array<{ name: string; value: number; owner: string; stage: string }>;
+  recentDeals: Array<{ name: string; value: number; owner: string; stage: string; closedDate: string }>;
+  dealsByCountry: Array<{ name: string; deals: number; value: number }>;
+  wonDealsStage: Array<{ stage: string; percentage: number; value: number }>;
+  recentActivities: Array<{ type: string; description: string; time: string; user: string }>;
+}
+
+interface DateRange {
+  start: string;
+  end: string;
+}
 
 const DealsDashboard = () => {
   const routes = all_routes;
+  const socket = useSocket();
+  const { user } = useUser();
+  const [dashboardData, setDashboardData] = useState<DealData | null>(null);
+  const [dataReceived, setDataReceived] = useState(false);
+  const [requestTimedOut, setRequestTimedOut] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"week" | "month" | "year">("week");
+  
+  // Date range state
+  const [dateRange, setDateRange] = useState<DateRange>({
+    start: new Date(new Date().getFullYear(), 0, 1).toISOString(), // Start of current year
+    end: new Date().toISOString(),
+  });
 
-  const [pipeline_chart] = useState<any>({
+  // Filter states for different sections
+  const [pipelineFilter, setPipelineFilter] = useState<"thisWeek" | "thisMonth" | "lastWeek">("thisWeek");
+  const [dealsStageFilter, setDealsStageFilter] = useState<"thisWeek" | "thisMonth" | "lastWeek">("thisWeek");
+  const [companiesFilter, setCompaniesFilter] = useState<"thisWeek" | "thisMonth" | "lastWeek">("thisWeek");
+  const [topDealsFilter, setTopDealsFilter] = useState<"thisWeek" | "thisMonth" | "lastWeek">("thisWeek");
+  const [countryFilter, setCountryFilter] = useState<"thisMonth" | "thisWeek" | "lastWeek">("thisMonth");
+  const [wonDealsFilter, setWonDealsFilter] = useState<"salesPipeline" | "marketingPipeline">("salesPipeline");
+  const [selectedPipelineYear, setSelectedPipelineYear] = useState<number>(new Date().getFullYear());
+
+  // Enhanced pipeline chart configuration
+  const [pipeline_chart, setPipelineChart] = useState<any>({
     series: [
       {
-        name: "",
-        data: [1380, 1100, 990, 880, 740, 540],
+        name: "Deal Value",
+        data: [0, 0, 0, 0, 0],
       },
     ],
     chart: {
       type: "bar",
       height: 280,
+      toolbar: {
+        show: false,
+      },
     },
     plotOptions: {
       bar: {
-        borderRadius: 0,
+        borderRadius: 4,
         horizontal: true,
         distributed: true,
-        barHeight: "80%",
+        barHeight: "70%",
         isFunnel: true,
       },
     },
-    colors: ["#F26522", "#F37438", "#F5844E", "#F69364", "#F7A37A", "#F9B291"],
+    colors: ["#28a745", "#17a2b8", "#ffc107", "#fd7e14", "#dc3545"],
     dataLabels: {
       enabled: true,
-      formatter: function (
-        val: any,
-        opt: {
-          w: { globals: { labels: { [x: string]: any } } };
-          dataPointIndex: string | number;
-        }
-      ) {
-        return opt.w.globals.labels[opt.dataPointIndex];
+      formatter: function (val: any, opt: any) {
+        const categories = ["New", "Prospect", "Proposal", "Won", "Lost"];
+        return categories[opt.dataPointIndex] + ": $" + val.toLocaleString();
+      },
+      style: {
+        fontSize: "12px",
+        fontWeight: "bold",
+        colors: ["#fff"]
       },
       dropShadow: {
         enabled: true,
       },
     },
-    title: {
-      align: "top",
-    },
     xaxis: {
-      categories: [
-        "Marketing : 7,898",
-        "Sales : 4658",
-        "Email : 2898",
-        "Chat : 789",
-        "Operational : 655",
-        "Calls : 454",
-      ],
+      categories: ["New", "Prospect", "Proposal", "Won", "Lost"],
+      labels: {
+        formatter: function (val: any) {
+          return "$" + val.toLocaleString();
+        },
+      },
+    },
+    yaxis: {
+      labels: {
+        show: false,
+      },
     },
     legend: {
       show: false,
     },
+    tooltip: {
+      y: {
+        formatter: function (val: number) {
+          return "$" + val.toLocaleString();
+        },
+      },
+    },
   });
 
-  const [deals_stage] = useState<any>({
+  // Enhanced deals stage chart
+  const [deals_stage, setDealsStage] = useState<any>({
     chart: {
       height: 310,
       type: "bar",
-      stacked: true,
+      stacked: false,
       toolbar: {
         show: false,
       },
     },
-    colors: ["#FF6F28", "#F8F9FA"],
+    colors: ["#FF6F28", "#28a745"],
     responsive: [
       {
         breakpoint: 480,
@@ -94,20 +172,21 @@ const DealsDashboard = () => {
         borderRadius: 5,
         horizontal: false,
         endingShape: "rounded",
+        columnWidth: "60%",
       },
     },
     series: [
       {
-        name: "Income",
-        data: [80, 40, 100, 20],
+        name: "Deal Count",
+        data: [0, 0, 0, 0],
       },
       {
-        name: "Expenses",
-        data: [100, 100, 100, 100],
+        name: "Deal Value ($K)",
+        data: [0, 0, 0, 0],
       },
     ],
     xaxis: {
-      categories: ["Inpipeline", "Follow Up", "Schedule", "Conversion"],
+      categories: ["New", "Prospect", "Proposal", "Won"],
       labels: {
         style: {
           colors: "#6B7280",
@@ -122,6 +201,9 @@ const DealsDashboard = () => {
           colors: "#6B7280",
           fontSize: "13px",
         },
+        formatter: function (val: number) {
+          return val.toLocaleString();
+        },
       },
     },
     grid: {
@@ -129,91 +211,412 @@ const DealsDashboard = () => {
       strokeDashArray: 5,
     },
     legend: {
-      show: false,
+      show: true,
+      position: "top",
+      horizontalAlign: "right",
     },
     dataLabels: {
-      enabled: false, // Disable data labels
+      enabled: false,
     },
     fill: {
       opacity: 1,
     },
+    tooltip: {
+      y: {
+        formatter: function (val: number, opts: any) {
+          if (opts.seriesIndex === 1) {
+            return "$" + (val * 1000).toLocaleString();
+          }
+          return val.toString();
+        },
+      },
+    },
   });
 
-  //Attendance ChartJs
-  const [CanvaData, setCanvaData] = useState({});
-  const [CanvaOptions, setCanvaOptions] = useState({});
+  // Radar chart for top deals analysis
+  const [radarChartData, setRadarChartData] = useState({});
+  const [radarChartOptions, setRadarChartOptions] = useState({});
+  
   useEffect(() => {
-    const documentStyle = getComputedStyle(document.documentElement);
     const data = {
-      labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Ayg"], // Common labels for both series
+      labels: ["New Deals", "Prospects", "Proposals", "Won Deals", "Revenue", "Conversion"], 
       datasets: [
         {
-          label: "Email", // First series
-          data: [40, 70, 20, 40, 40, 70, 40, 60],
-          backgroundColor: "#2dcb73",
-          borderColor: "#2dcb73",
-          pointBackgroundColor: "#2dcb73",
+          label: "Current Period",
+          data: [40, 70, 60, 80, 90, 65],
+          backgroundColor: "rgba(40, 167, 69, 0.2)",
+          borderColor: "#28a745",
+          pointBackgroundColor: "#28a745",
           pointBorderColor: "#fff",
           pointHoverBackgroundColor: "#fff",
-          pointHoverBorderColor: "rgba(255, 99, 132, 1)",
+          pointHoverBorderColor: "#28a745",
           tension: 0.3,
         },
         {
-          label: "Chat", // Second series
-          data: [30, 30, 90, 30, 60, 30, 60, 90],
-          backgroundColor: "#4b3088",
-          borderColor: "#4b3088",
-          pointBackgroundColor: "#4b3088",
+          label: "Previous Period",
+          data: [30, 50, 40, 60, 70, 50],
+          backgroundColor: "rgba(255, 111, 40, 0.2)",
+          borderColor: "#FF6F28",
+          pointBackgroundColor: "#FF6F28",
           pointBorderColor: "#fff",
           pointHoverBackgroundColor: "#fff",
-          pointHoverBorderColor: "rgba(54, 162, 235, 1)",
-          tension: 0.4,
-        },
-        {
-          label: "Series 3", // Second series
-          data: [70, 43, 70, 90, 30, 30, 30, 40],
-          backgroundColor: "#F26522",
-          borderColor: "#F26522",
-          pointBackgroundColor: "#F26522",
-          pointBorderColor: "#fff",
-          pointHoverBackgroundColor: "#fff",
-          pointHoverBorderColor: "rgba(54, 162, 235, 1)",
+          pointHoverBorderColor: "#FF6F28",
           tension: 0.4,
         },
       ],
     };
+    
     const options = {
-      responsive: false,
+      responsive: true,
+      maintainAspectRatio: false,
       scales: {
         r: {
           angleLines: {
             display: true,
-            color: "#e9e9e9", // Color of the radial lines
+            color: "#e9e9e9",
           },
           grid: {
-            circular: true, // Make the grid lines circular
+            circular: true,
+            color: "#e9e9e9",
           },
           suggestedMin: 0,
           suggestedMax: 100,
           ticks: {
-            stepSize: 30,
+            stepSize: 20,
+            display: false,
+          },
+          pointLabels: {
+            font: {
+              size: 12,
+            },
           },
         },
       },
       plugins: {
         legend: {
-          display: false, // This hides the legend
+          display: true,
+          position: "bottom" as const,
         },
       },
     };
 
-    setCanvaData(data);
-    setCanvaOptions(options);
+    setRadarChartData(data);
+    setRadarChartOptions(options);
   }, []);
+
+  // Socket integration for real-time data
+  useEffect(() => {
+    if (!socket) {
+      console.log("[DealsDashboard] Socket not available yet");
+      return;
+    }
+
+    console.log("[DealsDashboard] Socket available, setting up listeners");
+
+    const handleDashboardResponse = (response: any) => {
+      console.log("[DealsDashboard] Received response:", response);
+      setRequestTimedOut(false);
+
+      if (response.done) {
+        const data = response.data || {};
+        console.log("[DealsDashboard] Dashboard data:", data);
+
+        setDashboardData(data);
+        setDataReceived(true);
+        setErrorMessage(null);
+
+        // Update charts with real data
+        if (data.dealsByStage) {
+          updatePipelineChart(data.dealsByStage);
+          updateDealsStageChart(data.dealsByStage);
+        }
+        
+        if (data.topDeals) {
+          updateRadarChart(data.topDeals);
+        }
+
+        console.log("[DealsDashboard] Dashboard data set successfully");
+      } else {
+        console.error("Deals dashboard error:", response.error);
+        setErrorMessage(response.error || "Failed to load dashboard");
+        setDataReceived(true);
+        // Set empty data structure
+        setDashboardData({
+          totalDeals: 0,
+          totalDealValue: 0,
+          wonDeals: 0,
+          lostDeals: 0,
+          averageDealSize: 0,
+          conversionRate: 0,
+          revenueThisMonth: 0,
+          activeDeals: 0,
+          dealsByStage: {
+            New: 0,
+            Prospect: 0,
+            Proposal: 0,
+            Won: 0,
+            Lost: 0,
+            monthlyData: {
+              new: new Array(12).fill(0),
+              prospect: new Array(12).fill(0),
+              proposal: new Array(12).fill(0),
+              won: new Array(12).fill(0),
+              lost: new Array(12).fill(0),
+              revenue: new Array(12).fill(0),
+            },
+          },
+          dealsByOwner: [],
+          dealsBySource: [],
+          topDeals: [],
+          recentDeals: [],
+          dealsByCountry: [],
+          wonDealsStage: [],
+          recentActivities: [],
+        });
+      }
+    };
+
+    // Listen for dashboard response
+    (socket as any).on("deal/dashboard/get-all-data-response", handleDashboardResponse);
+
+    // Fetch data if socket is connected
+    if ((socket as any).connected) {
+      setRequestTimedOut(false);
+      const timer = setTimeout(() => {
+        console.warn("[DealsDashboard] Request timed out");
+        setRequestTimedOut(true);
+        setDataReceived(true);
+        setErrorMessage("No response from server. Please try again.");
+      }, 7000);
+
+      (socket as any).emit("deal/dashboard/get-all-data", {
+        filter,
+        dateRange,
+        pipelineFilter,
+        dealsStageFilter,
+        companiesFilter,
+        topDealsFilter,
+        countryFilter,
+        wonDealsFilter,
+        selectedPipelineYear,
+      });
+
+      (socket as any).once("deal/dashboard/get-all-data-response", () => clearTimeout(timer));
+    } else {
+      const onConnect = () => {
+        (socket as any).emit("deal/dashboard/get-all-data", {
+          filter,
+          dateRange,
+          pipelineFilter,
+          dealsStageFilter,
+          companiesFilter,
+          topDealsFilter,
+          countryFilter,
+          wonDealsFilter,
+          selectedPipelineYear,
+        });
+      };
+      (socket as any).on("connect", onConnect);
+
+      return () => {
+        (socket as any).off("connect", onConnect);
+        (socket as any).off("deal/dashboard/get-all-data-response", handleDashboardResponse);
+      };
+    }
+
+    return () => {
+      (socket as any).off("deal/dashboard/get-all-data-response", handleDashboardResponse);
+    };
+  }, [socket, filter, dateRange, pipelineFilter, dealsStageFilter, companiesFilter, topDealsFilter, countryFilter, wonDealsFilter, selectedPipelineYear]);
+
+  // Chart update functions
+  const updatePipelineChart = (dealsByStage: any) => {
+    const stageData = [
+      dealsByStage.New || 0,
+      dealsByStage.Prospect || 0,
+      dealsByStage.Proposal || 0,
+      dealsByStage.Won || 0,
+      dealsByStage.Lost || 0,
+    ];
+
+    setPipelineChart(prev => ({
+      ...prev,
+      series: [{ ...prev.series[0], data: stageData }]
+    }));
+  };
+
+  const updateDealsStageChart = (dealsByStage: any) => {
+    const countData = [
+      dealsByStage.New || 0,
+      dealsByStage.Prospect || 0,
+      dealsByStage.Proposal || 0,
+      dealsByStage.Won || 0,
+    ];
+
+    const valueData = dealsByStage.monthlyData ? [
+      dealsByStage.monthlyData.new?.reduce((a: number, b: number) => a + b, 0) / 1000 || 0,
+      dealsByStage.monthlyData.prospect?.reduce((a: number, b: number) => a + b, 0) / 1000 || 0,
+      dealsByStage.monthlyData.proposal?.reduce((a: number, b: number) => a + b, 0) / 1000 || 0,
+      dealsByStage.monthlyData.won?.reduce((a: number, b: number) => a + b, 0) / 1000 || 0,
+    ] : [0, 0, 0, 0];
+
+    setDealsStage(prev => ({
+      ...prev,
+      series: [
+        { name: "Deal Count", data: countData },
+        { name: "Deal Value ($K)", data: valueData }
+      ]
+    }));
+  };
+
+  const updateRadarChart = (topDeals: any[]) => {
+    if (!topDeals || topDeals.length === 0) return;
+    
+    // Calculate metrics based on top deals
+    const metrics = topDeals.slice(0, 6).map(deal => deal.value / 1000);
+    
+    setRadarChartData((prev: any) => ({
+      ...prev,
+      datasets: [
+        {
+          ...prev.datasets[0],
+          data: metrics.length >= 6 ? metrics : [...metrics, ...new Array(6 - metrics.length).fill(0)]
+        },
+        prev.datasets[1] // Keep previous period data
+      ]
+    }));
+  };
+
+  // Export functionality
+  const exportToPDF = () => {
+    const doc = new jsPDF();
+    const pageHeight = doc.internal.pageSize.height;
+    let yPosition = 20;
+
+    // Title
+    doc.setFontSize(20);
+    doc.text("Deals Dashboard Report", 20, yPosition);
+    yPosition += 20;
+
+    // Date range
+    doc.setFontSize(12);
+    doc.text(`Report generated: ${new Date().toLocaleDateString()}`, 20, yPosition);
+    yPosition += 10;
+    doc.text(`Date range: ${new Date(dateRange.start).toLocaleDateString()} - ${new Date(dateRange.end).toLocaleDateString()}`, 20, yPosition);
+    yPosition += 20;
+
+    // Key metrics
+    if (dashboardData) {
+      doc.setFontSize(16);
+      doc.text("Key Metrics", 20, yPosition);
+      yPosition += 15;
+
+      doc.setFontSize(12);
+      const metrics = [
+        `Total Deals: ${dashboardData.totalDeals?.toLocaleString() || 0}`,
+        `Total Deal Value: $${dashboardData.totalDealValue?.toLocaleString() || 0}`,
+        `Won Deals: ${dashboardData.wonDeals?.toLocaleString() || 0}`,
+        `Lost Deals: ${dashboardData.lostDeals?.toLocaleString() || 0}`,
+        `Average Deal Size: $${dashboardData.averageDealSize?.toLocaleString() || 0}`,
+        `Conversion Rate: ${dashboardData.conversionRate?.toFixed(1) || 0}%`,
+        `Revenue This Month: $${dashboardData.revenueThisMonth?.toLocaleString() || 0}`,
+        `Active Deals: ${dashboardData.activeDeals?.toLocaleString() || 0}`,
+      ];
+
+      metrics.forEach((metric) => {
+        doc.text(metric, 20, yPosition);
+        yPosition += 8;
+      });
+    }
+
+    doc.save("deals-dashboard-report.pdf");
+  };
+
+  const exportToExcel = () => {
+    const workbook = XLSX.utils.book_new();
+
+    // Summary sheet
+    const summaryData = [
+      ["Metric", "Value"],
+      ["Total Deals", dashboardData?.totalDeals || 0],
+      ["Total Deal Value", dashboardData?.totalDealValue || 0],
+      ["Won Deals", dashboardData?.wonDeals || 0],
+      ["Lost Deals", dashboardData?.lostDeals || 0],
+      ["Average Deal Size", dashboardData?.averageDealSize || 0],
+      ["Conversion Rate (%)", dashboardData?.conversionRate || 0],
+      ["Revenue This Month", dashboardData?.revenueThisMonth || 0],
+      ["Active Deals", dashboardData?.activeDeals || 0],
+    ];
+    const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
+    XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
+
+    // Recent deals sheet
+    if (dashboardData?.recentDeals && dashboardData.recentDeals.length > 0) {
+      const dealsData = [
+        ["Deal Name", "Value", "Owner", "Stage", "Closed Date"],
+        ...dashboardData.recentDeals.map(deal => [
+          deal.name,
+          deal.value,
+          deal.owner,
+          deal.stage,
+          deal.closedDate
+        ])
+      ];
+      const dealsSheet = XLSX.utils.aoa_to_sheet(dealsData);
+      XLSX.utils.book_append_sheet(workbook, dealsSheet, "Recent Deals");
+    }
+
+    XLSX.writeFile(workbook, "deals-dashboard-report.xlsx");
+  };
+
+  // Utility functions
+  const formatCurrency = (value: number): string => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value);
+  };
+
+  const formatPercentage = (value: number): string => {
+    return `${value.toFixed(1)}%`;
+  };
+
+  const getGrowthIcon = (growth: number) => {
+    if (growth > 0) {
+      return <i className="ti ti-arrow-wave-right-up me-1 text-success" />;
+    } else if (growth < 0) {
+      return <i className="ti ti-arrow-wave-right-down me-1 text-danger" />;
+    } else {
+      return <i className="ti ti-minus me-1 text-warning" />;
+    }
+  };
+
+  const getGrowthColor = (growth: number): string => {
+    if (growth > 0) return "text-success";
+    if (growth < 0) return "text-danger";
+    return "text-warning";
+  };
+
+  // Loading state
+  if (!dataReceived && !requestTimedOut) {
+    return (
+      <div className="page-wrapper">
+        <div className="content">
+          <div className="d-flex justify-content-center align-items-center" style={{ minHeight: "400px" }}>
+            <div className="spinner-border text-primary" role="status">
+              <span className="visually-hidden">Loading...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const today = new Date();
   const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, "0"); // Month is zero-based, so we add 1
+  const month = String(today.getMonth() + 1).padStart(2, "0");
   const day = String(today.getDate()).padStart(2, "0");
   const formattedDate = `${month}-${day}-${year}`;
   const defaultValue = dayjs(formattedDate);
@@ -254,13 +657,13 @@ const DealsDashboard = () => {
                   </Link>
                   <ul className="dropdown-menu  dropdown-menu-end p-3">
                     <li>
-                      <Link to="#" className="dropdown-item rounded-1">
+                      <Link to="#" className="dropdown-item rounded-1" onClick={exportToPDF}>
                         <i className="ti ti-file-type-pdf me-1" />
                         Export as PDF
                       </Link>
                     </li>
                     <li>
-                      <Link to="#" className="dropdown-item rounded-1">
+                      <Link to="#" className="dropdown-item rounded-1" onClick={exportToExcel}>
                         <i className="ti ti-file-type-xls me-1" />
                         Export as Excel{" "}
                       </Link>
@@ -286,11 +689,11 @@ const DealsDashboard = () => {
                       <div className="d-flex justify-content-between align-items-center flex-wrap mb-3">
                         <div>
                           <p className="fw-medium mb-1">Total Deals</p>
-                          <h5>$45,221,45</h5>
+                          <h5>{dashboardData?.totalDeals?.toLocaleString() || 0}</h5>
                         </div>
                         <div className="avatar avatar-md br-10 icon-rotate bg-primary">
                           <span className="d-flex align-items-center">
-                            <i className="ti ti-delta text-white fs-16" />
+                            <i className="ti ti-briefcase text-white fs-16" />
                           </span>
                         </div>
                       </div>
@@ -298,13 +701,13 @@ const DealsDashboard = () => {
                         <div
                           className="progress-bar bg-primary"
                           role="progressbar"
-                          style={{ width: "40%" }}
+                          style={{ width: `${Math.min(100, (dashboardData?.totalDeals || 0) / 10)}%` }}
                         />
                       </div>
                       <p className="fw-medium fs-13">
-                        <span className="text-danger fs-12">
-                          <i className="ti ti-arrow-wave-right-up me-1" />
-                          -4.01%{" "}
+                        <span className={`fs-12 ${getGrowthColor(5.2)}`}>
+                          {getGrowthIcon(5.2)}
+                          +5.2%{" "}
                         </span>{" "}
                         from last week
                       </p>
@@ -314,12 +717,12 @@ const DealsDashboard = () => {
                     <div className="card-body">
                       <div className="d-flex justify-content-between align-items-center flex-wrap mb-3">
                         <div>
-                          <p className="fw-medium mb-1">Deal Value</p>
-                          <h5>$12,545,68</h5>
+                          <p className="fw-medium mb-1">Total Deal Value</p>
+                          <h5>{formatCurrency(dashboardData?.totalDealValue || 0)}</h5>
                         </div>
                         <div className="avatar avatar-md br-10 icon-rotate bg-secondary">
                           <span className="d-flex align-items-center">
-                            <i className="ti ti-currency text-white fs-16" />
+                            <i className="ti ti-currency-dollar text-white fs-16" />
                           </span>
                         </div>
                       </div>
@@ -327,13 +730,13 @@ const DealsDashboard = () => {
                         <div
                           className="progress-bar bg-secondary"
                           role="progressbar"
-                          style={{ width: "40%" }}
+                          style={{ width: "65%" }}
                         />
                       </div>
                       <p className="fw-medium fs-13">
-                        <span className="text-success fs-12">
-                          <i className="ti ti-arrow-wave-right-up me-1" />
-                          +20.01%{" "}
+                        <span className={`fs-12 ${getGrowthColor(12.5)}`}>
+                          {getGrowthIcon(12.5)}
+                          +12.5%{" "}
                         </span>{" "}
                         from last week
                       </p>
@@ -343,12 +746,12 @@ const DealsDashboard = () => {
                     <div className="card-body">
                       <div className="d-flex justify-content-between align-items-center flex-wrap mb-3">
                         <div>
-                          <p className="fw-medium mb-1">Revenue this month </p>
-                          <h5>$46,548,48</h5>
+                          <p className="fw-medium mb-1">Revenue This Month</p>
+                          <h5>{formatCurrency(dashboardData?.revenueThisMonth || 0)}</h5>
                         </div>
                         <div className="avatar avatar-md br-10 icon-rotate bg-pink">
                           <span className="d-flex align-items-center">
-                            <i className="ti ti-stairs-up text-white fs-16" />
+                            <i className="ti ti-trending-up text-white fs-16" />
                           </span>
                         </div>
                       </div>
@@ -356,13 +759,13 @@ const DealsDashboard = () => {
                         <div
                           className="progress-bar bg-pink"
                           role="progressbar"
-                          style={{ width: "40%" }}
+                          style={{ width: "78%" }}
                         />
                       </div>
                       <p className="fw-medium fs-13">
-                        <span className="text-success fs-12">
-                          <i className="ti ti-arrow-wave-right-up me-1" />
-                          +55%{" "}
+                        <span className={`fs-12 ${getGrowthColor(18.3)}`}>
+                          {getGrowthIcon(18.3)}
+                          +18.3%{" "}
                         </span>{" "}
                         from last week
                       </p>
@@ -374,26 +777,26 @@ const DealsDashboard = () => {
                     <div className="card-body">
                       <div className="d-flex justify-content-between align-items-center flex-wrap mb-3">
                         <div>
-                          <p className="fw-medium mb-1">Total Customers</p>
-                          <h5>9895</h5>
+                          <p className="fw-medium mb-1">Won Deals</p>
+                          <h5>{dashboardData?.wonDeals?.toLocaleString() || 0}</h5>
                         </div>
-                        <div className="avatar avatar-md br-10 icon-rotate bg-purple">
+                        <div className="avatar avatar-md br-10 icon-rotate bg-success">
                           <span className="d-flex align-items-center">
-                            <i className="ti ti-users-group text-white fs-16" />
+                            <i className="ti ti-trophy text-white fs-16" />
                           </span>
                         </div>
                       </div>
                       <div className="progress progress-xs mb-2">
                         <div
-                          className="progress-bar bg-purple"
+                          className="progress-bar bg-success"
                           role="progressbar"
-                          style={{ width: "40%" }}
+                          style={{ width: "85%" }}
                         />
                       </div>
                       <p className="fw-medium fs-13">
-                        <span className="text-success fs-12">
-                          <i className="ti ti-arrow-wave-right-up me-1" />
-                          +55%{" "}
+                        <span className={`fs-12 ${getGrowthColor(24.1)}`}>
+                          {getGrowthIcon(24.1)}
+                          +24.1%{" "}
                         </span>{" "}
                         from last week
                       </p>
@@ -404,11 +807,11 @@ const DealsDashboard = () => {
                       <div className="d-flex justify-content-between align-items-center flex-wrap mb-3">
                         <div>
                           <p className="fw-medium mb-1">Conversion Rate</p>
-                          <h5>51.96%</h5>
+                          <h5>{formatPercentage(dashboardData?.conversionRate || 0)}</h5>
                         </div>
                         <div className="avatar avatar-md br-10 icon-rotate bg-info">
                           <span className="d-flex align-items-center">
-                            <i className="ti ti-swipe text-white fs-16" />
+                            <i className="ti ti-percentage text-white fs-16" />
                           </span>
                         </div>
                       </div>
@@ -416,13 +819,13 @@ const DealsDashboard = () => {
                         <div
                           className="progress-bar bg-info"
                           role="progressbar"
-                          style={{ width: "40%" }}
+                          style={{ width: `${Math.min(100, dashboardData?.conversionRate || 0)}%` }}
                         />
                       </div>
                       <p className="fw-medium fs-13">
-                        <span className="text-danger fs-12">
-                          <i className="ti ti-arrow-wave-right-up me-1" />
-                          -6.01%{" "}
+                        <span className={`fs-12 ${getGrowthColor(-2.1)}`}>
+                          {getGrowthIcon(-2.1)}
+                          -2.1%{" "}
                         </span>{" "}
                         from last week
                       </p>
@@ -432,12 +835,12 @@ const DealsDashboard = () => {
                     <div className="card-body">
                       <div className="d-flex justify-content-between align-items-center flex-wrap mb-3">
                         <div>
-                          <p className="fw-medium mb-1">Active Customers </p>
-                          <h5>8987</h5>
+                          <p className="fw-medium mb-1">Average Deal Size</p>
+                          <h5>{formatCurrency(dashboardData?.averageDealSize || 0)}</h5>
                         </div>
                         <div className="avatar avatar-md br-10 icon-rotate bg-warning">
                           <span className="d-flex align-items-center">
-                            <i className="ti ti-star text-white fs-16" />
+                            <i className="ti ti-calculator text-white fs-16" />
                           </span>
                         </div>
                       </div>
@@ -445,13 +848,13 @@ const DealsDashboard = () => {
                         <div
                           className="progress-bar bg-warning"
                           role="progressbar"
-                          style={{ width: "40%" }}
+                          style={{ width: "72%" }}
                         />
                       </div>
                       <p className="fw-medium fs-13">
-                        <span className="text-danger fs-12">
-                          <i className="ti ti-arrow-wave-right-up me-1" />
-                          -3.22%{" "}
+                        <span className={`fs-12 ${getGrowthColor(8.7)}`}>
+                          {getGrowthIcon(8.7)}
+                          +8.7%{" "}
                         </span>{" "}
                         from last week
                       </p>
@@ -503,51 +906,51 @@ const DealsDashboard = () => {
                     height={280}
                   />
                   <div>
-                    <h6 className="mb-3">Leads Values By Stages</h6>
+                    <h6 className="mb-3">Deal Values By Stages</h6>
                     <div className="row g-2 justify-content-center">
                       <div className="col-md col-sm-4 col-6">
                         <div className="border rounded text-center p-2">
                           <p className="mb-1">
-                            <i className="ti ti-point-filled text-primary" />
-                            Marketing
+                            <i className="ti ti-point-filled text-success" />
+                            New
                           </p>
-                          <h6>$5,221,45</h6>
+                          <h6>{formatCurrency(dashboardData?.dealsByStage?.New || 0)}</h6>
+                        </div>
+                      </div>
+                      <div className="col-md col-sm-4 col-6">
+                        <div className="border rounded text-center p-2">
+                          <p className="mb-1">
+                            <i className="ti ti-point-filled text-info" />
+                            Prospect
+                          </p>
+                          <h6>{formatCurrency(dashboardData?.dealsByStage?.Prospect || 0)}</h6>
+                        </div>
+                      </div>
+                      <div className="col-md col-sm-4 col-6">
+                        <div className="border rounded text-center p-2">
+                          <p className="mb-1">
+                            <i className="ti ti-point-filled text-warning" />
+                            Proposal
+                          </p>
+                          <h6>{formatCurrency(dashboardData?.dealsByStage?.Proposal || 0)}</h6>
                         </div>
                       </div>
                       <div className="col-md col-sm-4 col-6">
                         <div className="border rounded text-center p-2">
                           <p className="mb-1">
                             <i className="ti ti-point-filled text-primary" />
-                            Sales
+                            Won
                           </p>
-                          <h6>$30,424</h6>
+                          <h6>{formatCurrency(dashboardData?.dealsByStage?.Won || 0)}</h6>
                         </div>
                       </div>
                       <div className="col-md col-sm-4 col-6">
                         <div className="border rounded text-center p-2">
                           <p className="mb-1">
-                            <i className="ti ti-point-filled text-primary" />
-                            Email
+                            <i className="ti ti-point-filled text-danger" />
+                            Lost
                           </p>
-                          <h6>$21,135</h6>
-                        </div>
-                      </div>
-                      <div className="col-md col-sm-4 col-6">
-                        <div className="border rounded text-center p-2">
-                          <p className="mb-1">
-                            <i className="ti ti-point-filled text-primary" />
-                            Chat
-                          </p>
-                          <h6>$15,235</h6>
-                        </div>
-                      </div>
-                      <div className="col-md col-sm-4 col-6">
-                        <div className="border rounded text-center p-2">
-                          <p className="mb-1">
-                            <i className="ti ti-point-filled text-primary" />
-                            Operational
-                          </p>
-                          <h6>$10,557</h6>
+                          <h6>{formatCurrency(dashboardData?.dealsByStage?.Lost || 0)}</h6>
                         </div>
                       </div>
                     </div>
@@ -594,14 +997,14 @@ const DealsDashboard = () => {
                 <div className="card-body pb-0">
                   <div>
                     <div className="d-flex align-items-center">
-                      <h3 className="me-2">98%</h3>
+                      <h3 className="me-2">{formatPercentage(dashboardData?.conversionRate || 0)}</h3>
                       <span className="badge badge-outline-success bg-success-transparent rounded-pill me-1">
-                        12%
+                        +8.2%
                       </span>
-                      <span>vs last years</span>
+                      <span>vs last period</span>
                     </div>
                     <ReactApexChart
-                      id="revenue-income"
+                      id="deals-stage-chart"
                       options={deals_stage}
                       series={deals_stage.series}
                       type="bar"
@@ -647,131 +1050,38 @@ const DealsDashboard = () => {
                 </div>
                 <div className="card-body">
                   <div>
-                    <div className="border border-dashed bg-transparent-light rounded p-2 mb-2">
-                      <div className="d-flex align-items-center justify-content-between">
-                        <div className="d-flex align-items-center">
-                          <Link
-                            to="#"
-                            className="avatar avatar-md rounded-circle bg-gray-100 flex-shrink-0 me-2"
-                          >
-                            <ImageWithBasePath
-                              src="assets/img/company/company-24.svg"
-                              className="w-auto h-auto"
-                              alt="Img"
-                            />
-                          </Link>
-                          <div>
-                            <h6 className="fw-medium mb-1">Pitch</h6>
-                            <p className="text-truncate">
-                              Closing Deal date 05 April, 2025
-                            </p>
+                    {dashboardData?.dealsByOwner && dashboardData.dealsByOwner.length > 0 ? (
+                      dashboardData.dealsByOwner.slice(0, 5).map((owner, index) => (
+                        <div key={index} className="border border-dashed bg-transparent-light rounded p-2 mb-2">
+                          <div className="d-flex align-items-center justify-content-between">
+                            <div className="d-flex align-items-center">
+                              <Link
+                                to="#"
+                                className="avatar avatar-md rounded-circle bg-gray-100 flex-shrink-0 me-2"
+                              >
+                                <span className="text-primary fw-bold">
+                                  {owner.name.split(' ').map(n => n[0]).join('').toUpperCase()}
+                                </span>
+                              </Link>
+                              <div>
+                                <h6 className="fw-medium mb-1">{owner.name}</h6>
+                                <p className="text-truncate">
+                                  {owner.deals} deals • Avg: {formatCurrency(owner.value / owner.deals)}
+                                </p>
+                              </div>
+                            </div>
+                            <div>
+                              <h6>{formatCurrency(owner.value)}</h6>
+                            </div>
                           </div>
                         </div>
-                        <div>
-                          <h6>$3655</h6>
-                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center py-4">
+                        <i className="ti ti-briefcase fs-48 text-muted mb-3"></i>
+                        <p className="text-muted">No deal owners data available</p>
                       </div>
-                    </div>
-                    <div className="border border-dashed bg-transparent-light rounded p-2 mb-2">
-                      <div className="d-flex align-items-center justify-content-between">
-                        <div className="d-flex align-items-center">
-                          <Link
-                            to="#"
-                            className="avatar avatar-md rounded-circle bg-gray-100 flex-shrink-0 me-2"
-                          >
-                            <ImageWithBasePath
-                              src="assets/img/company/company-25.svg"
-                              className="w-auto h-auto"
-                              alt="Img"
-                            />
-                          </Link>
-                          <div>
-                            <h6 className="fw-medium mb-1">Initech</h6>
-                            <p className="text-truncate">
-                              Closing Deal date 05 May, 2025
-                            </p>
-                          </div>
-                        </div>
-                        <div>
-                          <h6>$2185</h6>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="border border-dashed bg-transparent-light rounded p-2 mb-2">
-                      <div className="d-flex align-items-center justify-content-between">
-                        <div className="d-flex align-items-center">
-                          <Link
-                            to="#"
-                            className="avatar avatar-md rounded-circle bg-gray-100 flex-shrink-0 me-2"
-                          >
-                            <ImageWithBasePath
-                              src="assets/img/company/company-26.svg"
-                              className="w-auto h-auto"
-                              alt="Img"
-                            />
-                          </Link>
-                          <div>
-                            <h6 className="fw-medium mb-1">Umbrella Corp</h6>
-                            <p className="text-truncate">
-                              Closing Deal date 29 April, 2025
-                            </p>
-                          </div>
-                        </div>
-                        <div>
-                          <h6>$1583</h6>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="border border-dashed bg-transparent-light rounded p-2 mb-2">
-                      <div className="d-flex align-items-center justify-content-between">
-                        <div className="d-flex align-items-center">
-                          <Link
-                            to="#"
-                            className="avatar avatar-md rounded-circle bg-gray-100 flex-shrink-0 me-2"
-                          >
-                            <ImageWithBasePath
-                              src="assets/img/company/company-27.svg"
-                              className="w-auto h-auto"
-                              alt="Img"
-                            />
-                          </Link>
-                          <div>
-                            <h6 className="fw-medium mb-1">Capital Partners</h6>
-                            <p className="text-truncate">
-                              Closing Deal date 23 Mar, 2025
-                            </p>
-                          </div>
-                        </div>
-                        <div>
-                          <h6>$6584</h6>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="border border-dashed bg-transparent-light rounded p-2">
-                      <div className="d-flex align-items-center justify-content-between">
-                        <div className="d-flex align-items-center">
-                          <Link
-                            to="#"
-                            className="avatar avatar-md rounded-circle bg-gray-100 flex-shrink-0 me-2"
-                          >
-                            <ImageWithBasePath
-                              src="assets/img/company/company-28.svg"
-                              className="w-auto h-auto"
-                              alt="Img"
-                            />
-                          </Link>
-                          <div>
-                            <h6 className="fw-medium mb-1">Massive Dynamic</h6>
-                            <p className="text-truncate">
-                              Closing Deal date 23 Feb, 2025
-                            </p>
-                          </div>
-                        </div>
-                        <div>
-                          <h6>$2153</h6>
-                        </div>
-                      </div>
-                    </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -811,36 +1121,44 @@ const DealsDashboard = () => {
                   </div>
                 </div>
                 <div className="card-body">
-                  <div className="text-center">
+                  <div className="text-center mb-4">
                     <Chart
                       type="radar"
-                      data={CanvaData}
-                      options={CanvaData}
-                      className="mx-auto mb-3 canvachart"
+                      data={radarChartData}
+                      options={radarChartOptions}
+                      className="mx-auto mb-3"
+                      style={{ height: "300px" }}
                     />
                   </div>
                   <div>
-                    <h6 className="mb-3">Status</h6>
+                    <h6 className="mb-3">Deal Performance Metrics</h6>
+                    <div className="d-flex align-items-center justify-content-between mb-2">
+                      <p className="f-13 mb-0">
+                        <i className="ti ti-circle-filled text-success me-1" />
+                        New Deals
+                      </p>
+                      <p className="f-13 fw-medium text-gray-9">{dashboardData?.dealsByStage?.New || 0}</p>
+                    </div>
+                    <div className="d-flex align-items-center justify-content-between mb-2">
+                      <p className="f-13 mb-0">
+                        <i className="ti ti-circle-filled text-warning me-1" />
+                        Proposals
+                      </p>
+                      <p className="f-13 fw-medium text-gray-9">{dashboardData?.dealsByStage?.Proposal || 0}</p>
+                    </div>
                     <div className="d-flex align-items-center justify-content-between mb-2">
                       <p className="f-13 mb-0">
                         <i className="ti ti-circle-filled text-primary me-1" />
-                        Marketing
+                        Won Deals
                       </p>
-                      <p className="f-13 fw-medium text-gray-9">$5,69,877</p>
-                    </div>
-                    <div className="d-flex align-items-center justify-content-between mb-2">
-                      <p className="f-13 mb-0">
-                        <i className="ti ti-circle-filled text-purple me-1" />
-                        Chat
-                      </p>
-                      <p className="f-13 fw-medium text-gray-9">$4,84,575</p>
+                      <p className="f-13 fw-medium text-gray-9">{dashboardData?.dealsByStage?.Won || 0}</p>
                     </div>
                     <div className="d-flex align-items-center justify-content-between">
                       <p className="f-13 mb-0">
-                        <i className="ti ti-circle-filled text-success me-1" />
-                        Email
+                        <i className="ti ti-circle-filled text-info me-1" />
+                        Total Revenue
                       </p>
-                      <p className="f-13 fw-medium text-gray-9">$1,84,575</p>
+                      <p className="f-13 fw-medium text-gray-9">{formatCurrency(dashboardData?.revenueThisMonth || 0)}</p>
                     </div>
                   </div>
                 </div>
@@ -864,211 +1182,64 @@ const DealsDashboard = () => {
                   </div>
                 </div>
                 <div className="card-body py-2">
-                  <div className="table-responsive pt-1">
-                    <table className="table table-nowrap table-borderless mb-0">
-                      <tbody>
-                        <tr>
-                          <td className="px-0">
-                            <div className="d-flex align-items-center mb-2">
-                              <Link
-                                to="countries.html"
-                                className="avatar rounded-circle border border-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/payment-gateway/country-01.svg"
-                                  className="img-fluid rounded-circle"
-                                  alt="img"
-                                />
-                              </Link>
-                              <div className="ms-2">
-                                <h6 className="fw-medium mb-1">
-                                  <Link to="countries.html">USA</Link>
-                                </h6>
-                                <span className="fs-13 d-inline-flex align-items-center">
-                                  Deals : 350
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="text-center mb-2">
-                              <span
-                                className="country-chart-1"
-                                data-width="100%"
-                              >
-                                0,3,0,2,1,3,1
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-0 text-end">
-                            <div className="mb-2">
-                              <p className="fs-13 mb-1">Total Value</p>
-                              <h6 className="fw-medium">$1065.00</h6>
-                            </div>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td className="px-0">
-                            <div className="d-flex align-items-center mb-2">
-                              <Link
-                                to="countries.html"
-                                className="avatar rounded-circle border border-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/payment-gateway/country-02.svg"
-                                  className="img-fluid rounded-circle"
-                                  alt="img"
-                                />
-                              </Link>
-                              <div className="ms-2">
-                                <h6 className="fw-medium mb-1">
-                                  <Link to="countries.html">UAE</Link>
-                                </h6>
-                                <span className="fs-13 d-inline-flex align-items-center">
-                                  Deals : 221
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="text-center mb-2">
-                              <span
-                                className="country-chart-1"
-                                data-width="100%"
-                              >
-                                0,3,0,2,1,3,1
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-0 text-end">
-                            <div className="mb-2">
-                              <p className="fs-13 mb-1">Total Value</p>
-                              <h6 className="fw-medium">$966.00</h6>
-                            </div>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td className="px-0">
-                            <div className="d-flex align-items-center mb-2">
-                              <Link
-                                to="countries.html"
-                                className="avatar rounded-circle border border-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/payment-gateway/country-03.svg"
-                                  className="img-fluid rounded-circle"
-                                  alt="img"
-                                />
-                              </Link>
-                              <div className="ms-2">
-                                <h6 className="fw-medium mb-1">
-                                  <Link to="countries.html">Singapore</Link>
-                                </h6>
-                                <span className="fs-13 d-inline-flex align-items-center">
-                                  Deals : 236
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="text-center mb-2">
-                              <span
-                                className="country-chart-2"
-                                data-width="100%"
-                              >
-                                0,3,0,2,1,3,1
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-0 text-end">
-                            <div className="mb-2">
-                              <p className="fs-13 mb-1">Total Value</p>
-                              <h6 className="fw-medium">$959.00</h6>
-                            </div>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td className="px-0">
-                            <div className="d-flex align-items-center mb-2">
-                              <Link
-                                to="countries.html"
-                                className="avatar rounded-circle border border-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/payment-gateway/country-04.svg"
-                                  className="img-fluid rounded-circle"
-                                  alt="img"
-                                />
-                              </Link>
-                              <div className="ms-2">
-                                <h6 className="fw-medium mb-1">
-                                  <Link to="countries.html">France</Link>
-                                </h6>
-                                <span className="fs-13 d-inline-flex align-items-center">
-                                  Deals : 589
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="text-center mb-2">
-                              <span
-                                className="country-chart-1"
-                                data-width="100%"
-                              >
-                                0,3,0,2,1,3,1
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-0 text-end">
-                            <div className="mb-2">
-                              <p className="fs-13 mb-1">Total Value</p>
-                              <h6 className="fw-medium">$879.00</h6>
-                            </div>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td className="px-0">
-                            <div className="d-flex align-items-center">
-                              <Link
-                                to="countries.html"
-                                className="avatar rounded-circle border border-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/payment-gateway/country-05.svg"
-                                  className="img-fluid rounded-circle"
-                                  alt="img"
-                                />
-                              </Link>
-                              <div className="ms-2">
-                                <h6 className="fw-medium mb-1">
-                                  <Link to="countries.html">Norway</Link>
-                                </h6>
-                                <span className="fs-13 d-inline-flex align-items-center">
-                                  Deals : 221
-                                </span>
-                              </div>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="text-center">
-                              <span
-                                className="country-chart-2"
-                                data-width="100%"
-                              >
-                                0,3,0,2,1,3,1
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-0 text-end">
-                            <p className="fs-13 mb-1">Total Value</p>
-                            <h6 className="fw-medium">$632.00</h6>
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
+                  {dashboardData?.dealsByCountry && dashboardData.dealsByCountry.length > 0 ? (
+                    <div className="table-responsive pt-1">
+                      <table className="table table-nowrap table-borderless mb-0">
+                        <tbody>
+                          {dashboardData.dealsByCountry.slice(0, 5).map((country, index) => (
+                            <tr key={index}>
+                              <td className="px-0">
+                                <div className="d-flex align-items-center mb-2">
+                                  <div className="avatar rounded-circle border border-2 d-flex align-items-center justify-content-center">
+                                    <span style={{ fontSize: "20px" }}>
+                                      {(() => {
+                                        const flagMap: { [key: string]: string } = {
+                                          "United States": "🇺🇸", "USA": "🇺🇸", "US": "🇺🇸",
+                                          "United Kingdom": "🇬🇧", "UK": "🇬🇧", "Britain": "🇬🇧",
+                                          "Germany": "🇩🇪", "France": "🇫🇷", "Italy": "🇮🇹", "Spain": "🇪🇸",
+                                          "Canada": "🇨🇦", "Australia": "🇦🇺", "Japan": "🇯🇵", "China": "🇨🇳",
+                                          "India": "🇮🇳", "Brazil": "🇧🇷", "Russia": "🇷🇺", "Mexico": "🇲🇽",
+                                          "Netherlands": "🇳🇱", "Sweden": "🇸🇪", "Norway": "🇳🇴", "Denmark": "🇩🇰",
+                                          "Singapore": "🇸🇬", "UAE": "🇦🇪", "Switzerland": "🇨🇭", "Austria": "🇦🇹"
+                                        };
+                                        return flagMap[country.name] || flagMap[country.name?.toUpperCase()] || "🌍";
+                                      })()}
+                                    </span>
+                                  </div>
+                                  <div className="ms-2">
+                                    <h6 className="fw-medium mb-1">
+                                      <Link to="#">{country.name}</Link>
+                                    </h6>
+                                    <span className="fs-13 d-inline-flex align-items-center">
+                                      Deals: {country.deals}
+                                    </span>
+                                  </div>
+                                </div>
+                              </td>
+                              <td>
+                                <div className="text-center mb-2">
+                                  <CircleProgress value={Math.min(100, (country.deals / 10) * 100)} />
+                                </div>
+                              </td>
+                              <td className="px-0 text-end">
+                                <div className="mb-2">
+                                  <p className="fs-13 mb-1">Total Value</p>
+                                  <h6 className="fw-medium">{formatCurrency(country.value)}</h6>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="text-center py-4">
+                      <i className="ti ti-world fs-48 text-muted mb-3"></i>
+                      <p className="text-muted">No country data available</p>
+                    </div>
+                  )}
                 </div>
+
               </div>
             </div>
             <div className="col-xl-4 d-flex">
@@ -1295,136 +1466,48 @@ const DealsDashboard = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        <tr>
-                          <td>
-                            <h6 className="fw-medium">
-                              <Link to="deals-details.html">Collins</Link>
-                            </h6>
-                          </td>
-                          <td>Quality To Buy</td>
-                          <td>$4,50,000</td>
-                          <td>
-                            <div className="d-flex align-items-center">
-                              <Link
-                                to="#"
-                                className="avatar avatar-rounded flex-shrink-0 me-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/users/user-32.jpg"
-                                  alt="Img"
-                                />
-                              </Link>
-                              <h6 className="fw-medium">
-                                <Link to="#">Anthony Lewis</Link>
-                              </h6>
-                            </div>
-                          </td>
-                          <td>14/01/2024</td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <h6 className="fw-medium">
-                              <Link to="deals-details.html">Konopelski</Link>
-                            </h6>
-                          </td>
-                          <td>Proposal Made</td>
-                          <td>$3,15,000</td>
-                          <td>
-                            <div className="d-flex align-items-center">
-                              <Link
-                                to="#"
-                                className="avatar avatar-rounded flex-shrink-0 me-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/users/user-09.jpg"
-                                  alt="Img"
-                                />
-                              </Link>
-                              <h6 className="fw-medium">
-                                <Link to="#">Brian Villalobos</Link>
-                              </h6>
-                            </div>
-                          </td>
-                          <td>21/01/2024</td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <h6 className="fw-medium">
-                              <Link to="deals-details.html">Adams</Link>
-                            </h6>
-                          </td>
-                          <td>Contact Made</td>
-                          <td>$8,40,000</td>
-                          <td>
-                            <div className="d-flex align-items-center">
-                              <Link
-                                to="#"
-                                className="avatar avatar-rounded flex-shrink-0 me-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/users/user-01.jpg"
-                                  alt="Img"
-                                />
-                              </Link>
-                              <h6 className="fw-medium">
-                                <Link to="#">Harvey Smith</Link>
-                              </h6>
-                            </div>
-                          </td>
-                          <td>20/02/2024</td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <h6 className="fw-medium">
-                              <Link to="deals-details.html">Schumm</Link>
-                            </h6>
-                          </td>
-                          <td>Quality To Buy</td>
-                          <td>$6,10,000</td>
-                          <td>
-                            <div className="d-flex align-items-center">
-                              <Link
-                                to="#"
-                                className="avatar avatar-rounded flex-shrink-0 me-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/users/user-33.jpg"
-                                  alt="Img"
-                                />
-                              </Link>
-                              <h6 className="fw-medium">
-                                <Link to="#">Stephan Peralt</Link>
-                              </h6>
-                            </div>
-                          </td>
-                          <td>15/03/2024</td>
-                        </tr>
-                        <tr>
-                          <td>
-                            <h6 className="fw-medium">
-                              <Link to="deals-details.html">Wisozk</Link>
-                            </h6>
-                          </td>
-                          <td>Presentation</td>
-                          <td>$4,70,000</td>
-                          <td>
-                            <div className="d-flex align-items-center">
-                              <Link
-                                to="#"
-                                className="avatar avatar-rounded flex-shrink-0 me-2"
-                              >
-                                <ImageWithBasePath
-                                  src="assets/img/users/user-34.jpg"
-                                  alt="Img"
-                                />
-                              </Link>
-                              <h6 className="fw-medium">
-                                <Link to="#">Doglas Martini</Link>
-                              </h6>
-                            </div>
-                          </td>
-                          <td>12/04/2024</td>
-                        </tr>
+                        {dashboardData?.recentDeals && dashboardData.recentDeals.length > 0 ? (
+                          dashboardData.recentDeals.slice(0, 5).map((deal, index) => (
+                            <tr key={index}>
+                              <td>
+                                <h6 className="fw-medium">
+                                  <Link to={`${routes.dealsDetails}/${deal.name}`}>{deal.name}</Link>
+                                </h6>
+                              </td>
+                              <td>
+                                <span className={`badge badge-soft-${
+                                  deal.stage === 'Won' ? 'success' :
+                                  deal.stage === 'Lost' ? 'danger' :
+                                  deal.stage === 'Proposal' ? 'warning' :
+                                  deal.stage === 'Prospect' ? 'info' : 'primary'
+                                }`}>
+                                  {deal.stage}
+                                </span>
+                              </td>
+                              <td>{formatCurrency(deal.value)}</td>
+                              <td>
+                                <div className="d-flex align-items-center">
+                                  <div className="avatar avatar-rounded bg-primary-transparent flex-shrink-0 me-2">
+                                    <span className="text-primary fw-bold">
+                                      {deal.owner.split(' ').map(n => n[0]).join('').toUpperCase()}
+                                    </span>
+                                  </div>
+                                  <h6 className="fw-medium">
+                                    <Link to="#">{deal.owner}</Link>
+                                  </h6>
+                                </div>
+                              </td>
+                              <td>{new Date(deal.closedDate).toLocaleDateString()}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5} className="text-center py-4">
+                              <i className="ti ti-briefcase fs-48 text-muted mb-3"></i>
+                              <p className="text-muted">No recent deals available</p>
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -1447,68 +1530,43 @@ const DealsDashboard = () => {
                   </div>
                 </div>
                 <div className="card-body schedule-timeline activity-timeline">
-                  <div className="d-flex align-items-start">
-                    <div className="avatar avatar-md avatar-rounded bg-success flex-shrink-0">
-                      <i className="ti ti-phone-filled fs-16" />
+                  {dashboardData?.recentActivities && dashboardData.recentActivities.length > 0 ? (
+                    dashboardData.recentActivities.slice(0, 4).map((activity, index) => (
+                      <div key={index} className="d-flex align-items-start">
+                        <div className={`avatar avatar-md avatar-rounded flex-shrink-0 ${
+                          activity.type === 'call' ? 'bg-success' :
+                          activity.type === 'email' ? 'bg-info' :
+                          activity.type === 'meeting' ? 'bg-purple' :
+                          activity.type === 'deal' ? 'bg-warning' : 'bg-primary'
+                        }`}>
+                          <i className={`fs-16 ${
+                            activity.type === 'call' ? 'ti ti-phone-filled' :
+                            activity.type === 'email' ? 'ti ti-mail-filled' :
+                            activity.type === 'meeting' ? 'ti ti-users' :
+                            activity.type === 'deal' ? 'ti ti-briefcase' : 'ti ti-activity'
+                          }`} />
+                        </div>
+                        <div className={`flex-fill ps-3 ${index < dashboardData.recentActivities.length - 1 ? 'pb-4 timeline-flow' : 'timeline-flow'}`}>
+                          <p className="fw-medium text-gray-9 mb-1">
+                            <Link to={routes.activity}>
+                              {activity.description}
+                            </Link>
+                          </p>
+                          <span className="text-muted fs-12">{activity.time}</span>
+                          {activity.user && (
+                            <div className="mt-1">
+                              <span className="badge badge-soft-primary">{activity.user}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-center py-4">
+                      <i className="ti ti-activity fs-48 text-muted mb-3"></i>
+                      <p className="text-muted">No recent activities</p>
                     </div>
-                    <div className="flex-fill ps-3 pb-4 timeline-flow">
-                      <p className="fw-medium text-gray-9 mb-1">
-                        <Link to="activity.html">
-                          Drain responded to your appointment schedule question.
-                        </Link>
-                      </p>
-                      <span>09:25 PM</span>
-                    </div>
-                  </div>
-                  <div className="d-flex align-items-start">
-                    <div className="avatar avatar-md avatar-rounded bg-info flex-shrink-0">
-                      <i className="ti ti-message-circle-2-filled fs-16" />
-                    </div>
-                    <div className="flex-fill ps-3 pb-4 timeline-flow">
-                      <p className="fw-medium text-gray-9 mb-1">
-                        <Link to="activity.html">
-                          You sent 1 Message to the James.
-                        </Link>
-                      </p>
-                      <span>10:25 PM</span>
-                    </div>
-                  </div>
-                  <div className="d-flex align-items-start">
-                    <div className="avatar avatar-md avatar-rounded bg-success flex-shrink-0">
-                      <i className="ti ti-phone-filled fs-16" />
-                    </div>
-                    <div className="flex-fill ps-3 pb-4 timeline-flow">
-                      <p className="fw-medium text-gray-9 mb-1">
-                        <Link to="activity.html">
-                          Denwar responded to your appointment on 25 Jan 2025,
-                          08:15 PM
-                        </Link>
-                      </p>
-                      <span>09:25 PM</span>
-                    </div>
-                  </div>
-                  <div className="d-flex align-items-start">
-                    <div className="avatar avatar-md avatar-rounded bg-purple flex-shrink-0">
-                      <i className="ti ti-user-circle fs-16" />
-                    </div>
-                    <div className="flex-fill ps-3 timeline-flow">
-                      <p className="fw-medium text-gray-9 mb-1">
-                        <Link
-                          to="activity.html"
-                          className="d-flex align-items-center"
-                        >
-                          Meeting With{" "}
-                          <ImageWithBasePath
-                            src="assets/img/users/user-58.jpg"
-                            className="avatar avatar-sm rounded-circle mx-2"
-                            alt="Img"
-                          />
-                          Abraham
-                        </Link>
-                      </p>
-                      <span>09:25 PM</span>
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
             </div>
