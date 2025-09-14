@@ -283,4 +283,276 @@ export const deleteDeal = async (companyId, id) => {
   }
 };
 
+// Helper function to get date range based on filter
+const getDateRange = (filter) => {
+  const now = new Date();
+  let start, end;
+  switch (filter) {
+    case "week":
+      start = new Date(now);
+      start.setDate(now.getDate() - now.getDay());
+      start.setHours(0, 0, 0, 0);
+      end = new Date(start);
+      end.setDate(start.getDate() + 7);
+      break;
+    case "month":
+      start = new Date(now.getFullYear(), now.getMonth(), 1);
+      end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      break;
+    case "year":
+      start = new Date(now.getFullYear(), 0, 1);
+      end = new Date(now.getFullYear() + 1, 0, 1);
+      break;
+    default:
+      start = null;
+      end = null;
+  }
+  return { start, end };
+};
+
+// Get comprehensive deal dashboard data
+export const getDealDashboardData = async (companyId, filters = {}) => {
+  try {
+    console.log("[DealDashboard] Fetching dashboard data for companyId:", companyId);
+    const collections = getTenantCollections(companyId);
+    
+    // Build date filter
+    let dateFilter = {};
+    const { filter = "month", dateRange } = filters;
+    
+    if (dateRange && dateRange.start && dateRange.end) {
+      const startDate = new Date(dateRange.start);
+      const endDate = new Date(dateRange.end);
+      dateFilter = {
+        createdAt: {
+          $gte: startDate,
+          $lte: endDate
+        }
+      };
+    } else {
+      const { start, end } = getDateRange(filter);
+      if (start && end) {
+        dateFilter = {
+          createdAt: {
+            $gte: start,
+            $lt: end
+          }
+        };
+      }
+    }
+
+    // Base query - exclude deleted deals
+    const baseQuery = { companyId, isDeleted: { $ne: true } };
+    const queryWithDate = { ...baseQuery, ...dateFilter };
+
+    // 1. Total Deals Metrics
+    const totalDeals = await collections.deals.countDocuments(baseQuery);
+    const totalDealsInPeriod = await collections.deals.countDocuments(queryWithDate);
+    
+    // Deals by status
+    const wonDeals = await collections.deals.countDocuments({ ...queryWithDate, status: "Won" });
+    const lostDeals = await collections.deals.countDocuments({ ...queryWithDate, status: "Lost" });
+    const openDeals = await collections.deals.countDocuments({ ...queryWithDate, status: "Open" });
+
+    // 2. Deal Value Metrics
+    const dealValueAgg = await collections.deals.aggregate([
+      { $match: queryWithDate },
+      { 
+        $group: {
+          _id: null,
+          totalValue: { $sum: "$dealValue" },
+          avgValue: { $avg: "$dealValue" },
+          wonValue: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "Won"] }, "$dealValue", 0] 
+            } 
+          },
+          lostValue: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "Lost"] }, "$dealValue", 0] 
+            } 
+          },
+          openValue: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "Open"] }, "$dealValue", 0] 
+            } 
+          }
+        }
+      }
+    ]).toArray();
+
+    const dealValues = dealValueAgg[0] || {
+      totalValue: 0,
+      avgValue: 0,
+      wonValue: 0,
+      lostValue: 0,
+      openValue: 0
+    };
+
+    // 3. Deals by Stage
+    const dealsByStage = await collections.deals.aggregate([
+      { $match: queryWithDate },
+      { $group: { _id: "$stage", count: { $sum: 1 }, value: { $sum: "$dealValue" } } },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    // 4. Deals by Owner
+    const dealsByOwner = await collections.deals.aggregate([
+      { $match: queryWithDate },
+      { 
+        $group: { 
+          _id: "$owner.name", 
+          count: { $sum: 1 }, 
+          value: { $sum: "$dealValue" },
+          wonCount: { $sum: { $cond: [{ $eq: ["$status", "Won"] }, 1, 0] } },
+          lostCount: { $sum: { $cond: [{ $eq: ["$status", "Lost"] }, 1, 0] } },
+          openCount: { $sum: { $cond: [{ $eq: ["$status", "Open"] }, 1, 0] } }
+        }
+      },
+      { $sort: { value: -1 } },
+      { $limit: 10 }
+    ]).toArray();
+
+    // 5. Monthly Deal Trends (for charts)
+    const monthlyTrends = await collections.deals.aggregate([
+      { 
+        $match: { 
+          companyId, 
+          isDeleted: { $ne: true },
+          createdAt: { 
+            $gte: new Date(new Date().getFullYear(), 0, 1),
+            $lt: new Date(new Date().getFullYear() + 1, 0, 1)
+          }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            month: { $month: "$createdAt" },
+            status: "$status"
+          },
+          count: { $sum: 1 },
+          value: { $sum: "$dealValue" }
+        }
+      },
+      { $sort: { "_id.month": 1 } }
+    ]).toArray();
+
+    // Process monthly data for frontend
+    const monthlyData = {
+      won: new Array(12).fill(0),
+      lost: new Array(12).fill(0),
+      open: new Array(12).fill(0),
+      wonValue: new Array(12).fill(0),
+      lostValue: new Array(12).fill(0),
+      openValue: new Array(12).fill(0)
+    };
+
+    monthlyTrends.forEach(item => {
+      const month = item._id.month - 1; // Convert to 0-based index
+      const status = item._id.status.toLowerCase();
+      if (monthlyData[status] !== undefined) {
+        monthlyData[status][month] = item.count;
+        monthlyData[`${status}Value`][month] = item.value;
+      }
+    });
+
+    // 6. Recent Deals
+    const recentDeals = await collections.deals
+      .find(queryWithDate)
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .toArray();
+
+    // 7. Deal Conversion Rate
+    const totalDealsWithStatus = wonDeals + lostDeals;
+    const conversionRate = totalDealsWithStatus > 0 ? (wonDeals / totalDealsWithStatus) * 100 : 0;
+
+    // 8. Average Deal Cycle Time (days from creation to Won/Lost)
+    const closedDealsWithDates = await collections.deals.aggregate([
+      { 
+        $match: { 
+          ...queryWithDate, 
+          status: { $in: ["Won", "Lost"] },
+          expectedClosedDate: { $exists: true }
+        }
+      },
+      {
+        $project: {
+          cycleDays: {
+            $divide: [
+              { $subtract: ["$updatedAt", "$createdAt"] },
+              1000 * 60 * 60 * 24 // Convert to days
+            ]
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          avgCycleDays: { $avg: "$cycleDays" }
+        }
+      }
+    ]).toArray();
+
+    const avgDealCycle = closedDealsWithDates[0]?.avgCycleDays || 0;
+
+    // 9. Top Performing Deals
+    const topDeals = await collections.deals
+      .find({ ...queryWithDate, status: "Won" })
+      .sort({ dealValue: -1 })
+      .limit(5)
+      .toArray();
+
+    // 10. Deals by Probability Range
+    const probabilityRanges = await collections.deals.aggregate([
+      { $match: queryWithDate },
+      {
+        $bucket: {
+          groupBy: "$probability",
+          boundaries: [0, 25, 50, 75, 100, 101],
+          default: "Other",
+          output: {
+            count: { $sum: 1 },
+            value: { $sum: "$dealValue" }
+          }
+        }
+      }
+    ]).toArray();
+
+    return {
+      done: true,
+      data: {
+        // Summary metrics
+        totalDeals,
+        totalDealsInPeriod,
+        wonDeals,
+        lostDeals,
+        openDeals,
+        dealValues,
+        conversionRate: Math.round(conversionRate * 100) / 100,
+        avgDealCycle: Math.round(avgDealCycle * 100) / 100,
+        
+        // Breakdown data
+        dealsByStage,
+        dealsByOwner,
+        probabilityRanges,
+        
+        // Time-based data
+        monthlyData,
+        recentDeals,
+        topDeals,
+        
+        // Filter info
+        filter,
+        dateRange: dateRange || { start: null, end: null }
+      }
+    };
+    
+  } catch (error) {
+    console.error("[DealDashboard] Error in getDealDashboardData", { error: error.message });
+    return { done: false, error: error.message };
+  }
+};
+
 

@@ -209,6 +209,17 @@ const dealController = (socket, io) => {
       socket.emit("deal:delete-response", { done: false, error: error.message });
     }
   });
+
+  // Deal Dashboard Events
+  socket.on("deal:dashboard:getData", async (filters = {}) => {
+    try {
+      const companyId = validateCompanyAccess(socket);
+      const result = await dealService.getDealDashboardData(companyId, filters);
+      socket.emit("deal:dashboard:getData-response", result);
+    } catch (error) {
+      socket.emit("deal:dashboard:getData-response", { done: false, error: error.message });
+    }
+  });
 };
 
 export default dealController;
