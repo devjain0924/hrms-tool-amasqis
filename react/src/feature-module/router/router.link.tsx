@@ -142,7 +142,7 @@ import EmailVerification2 from "../auth/emailVerification/emailVerification-2";
 import EmailVerification3 from "../auth/emailVerification/emailVerification-3";
 import EmployeeDashboard from "../mainMenu/employeeDashboard/employee-dashboard";
 import LeadsDasboard from "../mainMenu/leadsDashboard";
-import DealsDashboard from "../mainMenu/dealsDashboard";
+import DealsDashboard from "../crm/deals/dealsDashboard";
 import Leaflet from "../uiInterface/map/leaflet";
 import BootstrapIcons from "../uiInterface/icons/bootstrapicons";
 import RemixIcons from "../uiInterface/icons/remixIcons";
